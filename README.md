@@ -11,7 +11,7 @@ The framework of ORANSlice is shown in the diagram below:
 If you use this software, please reference the following paper:
 > H. Cheng, S. D’Oro, R. Gangula, S. Velumani, D. Villa, L. Bonati, M. Polese, G. Arrobo, C. Maciocco, T. Melodia, "ORANSlice: An Open-Source 5G Network Slicing
 Platform for O-RAN," in Proceedings of The 30th Annual International Conference on Mobile
-Computing and Networking (ACM MobiCom ’24), Washington, D.C., USA, November 18–22, 2024, [bibtex](https://ece.northeastern.edu/wineslab/wines_bibtex/Cheng2024oranslice.txt) [pdf](https://arxiv.org/pdf/2410.12978)
+Computing and Networking (ACM MobiCom ’24), Washington, D.C., USA, November 18–22, 2024. [[pdf]](https://arxiv.org/pdf/2410.12978)
 
 This work was supported by the U.S. National Science Foundation under Grant CNS-2117814.
 
