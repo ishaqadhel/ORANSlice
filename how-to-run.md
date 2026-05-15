@@ -237,6 +237,19 @@ Install all software needed to compile OAI gNB and nrUE.
 sudo apt-get update
 sudo apt-get install -y protobuf-compiler libprotoc-dev autoconf automake libtool
 
+sudo apt install -y autoconf automake libtool make gcc g++ pkg-config
+
+sudo apt install -y build-essential g++ clang
+
+sudo apt install -y \
+  build-essential \
+  pkg-config \
+  autoconf \
+  automake \
+  libtool \
+  curl \
+  git
+
 git clone https://github.com/protobuf-c/protobuf-c
 cd protobuf-c
 ./autogen.sh
