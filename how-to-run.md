@@ -431,8 +431,12 @@ If the file doesn't exist, get it from the OAI repository:
 # Clone the OAI repository (separate from ORANSlice)
 cd ~
 git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git oai_full
+
+# Create the target directory in ORANSlice
+mkdir -p ~/ORANSlice/oai_ran/tools/scripts
+
+# Copy only multi-ue.sh (multi-ue.d may not exist in newer OAI versions)
 cp oai_full/tools/scripts/multi-ue.sh ~/ORANSlice/oai_ran/tools/scripts/
-cp -r oai_full/tools/scripts/multi-ue.d ~/ORANSlice/oai_ran/tools/scripts/
 ```
 
 ### 7.3 Start the gNB
@@ -487,10 +491,10 @@ sudo ./nr-uesoftmodem \
   --sa \
   -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf \
   --rfsim \
-  --rfsimulator.serveraddr 10.201.1.100 \
-  --telnetsrv \
-  --telnetsrv.listenport 9095
+  --rfsimulator.serveraddr 10.201.1.100
 ```
+
+> **Note:** The `--telnetsrv` and `--telnetsrv.listenport` options are optional and may not be available in all builds. If omitted, the telnet server simply won't run — the UE will still work normally.
 
 Leave this terminal open and running. UE Slice 1 is now connected.
 
@@ -516,9 +520,7 @@ sudo ./nr-uesoftmodem \
   --sa \
   -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice2.conf \
   --rfsim \
-  --rfsimulator.serveraddr 10.202.1.100 \
-  --telnetsrv \
-  --telnetsrv.listenport 9096
+  --rfsimulator.serveraddr 10.202.1.100
 ```
 
 Both UEs are now running simultaneously. Keep both terminals open.
@@ -547,6 +549,9 @@ You should see:
 To test connectivity, run commands inside each namespace:
 
 ```bash
+
+cd ~/ORANSlice/oai_ran/tools/scripts
+
 # Test Slice 1 UE (inside namespace ue1)
 sudo ./multi-ue.sh -o1
 ping -I oaitun_ue1 -c 5 192.168.70.135
@@ -680,7 +685,7 @@ Change the ratios so Slice 1 (sd=0xFFFFFF, omitted) gets 80% and Slice 2 (sd=2) 
 
 Save and exit. Wait about 15 seconds for the gNB to pick up the change (no restart needed).
 
-### 10.3 Measure the Throughput Difference
+### 9.3 Measure the Throughput Difference
 
 **Terminal for Slice 1 iperf3 client:**
 ```bash
@@ -703,7 +708,7 @@ iperf3 -c 192.168.70.135 -B 12.1.2.11 -t 60 -i 5 -p 5202
 
 Edit `rrmPolicy.json` again and swap the ratios — set Slice 1's `max_ratio` to 20 and Slice 2's `min_ratio` to 80. After ~15 seconds, observe throughput switch.
 
-### 10.4 Verify Slicing Is Active in gNB Logs
+### 9.4 Verify Slicing Is Active in gNB Logs
 
 In the gNB terminal (Terminal 1), look for slice policy update messages:
 
@@ -891,7 +896,7 @@ UE2 (Slice 2) ──┘                     └────── SMF-slice2 ─
 
 **Prerequisites:** You still need everything from Steps 1–4 (Docker, OAI RAN built, gNB/UE configured). You will only **replace the Core Network** — the gNB and nrUE commands do not change.
 
-#### 11.2.1 Stop the Legacy CN
+#### 10.2.1 Stop the Legacy CN
 
 If the legacy CN is running, stop it first:
 
@@ -900,7 +905,7 @@ cd ~/ORANSlice/oai_cn/oai-cn5g-legacy/
 docker compose -f docker-compose-legacy.yml down
 ```
 
-#### 11.2.2 Clone the OAI CN Develop Repository
+#### 10.2.2 Clone the OAI CN Develop Repository
 
 The `dev_oai5gcn.patch` applies to the upstream `oai-cn5g-fed` repo at tag `v2.0.1`:
 
@@ -911,7 +916,7 @@ cd oai-cn5g-fed
 git checkout v2.0.1
 ```
 
-#### 11.2.3 Apply the ORANSlice Patch
+#### 10.2.3 Apply the ORANSlice Patch
 
 ```bash
 git apply ~/ORANSlice/oai_cn/dev_oai5gcn.patch
@@ -927,7 +932,7 @@ What the patch changes:
 - Pins all container images to `:develop` tag
 - Adds UE subscriber data for IMSIs `001010000010776` (Slice 1) and `001010000010777` (Slice 2)
 
-#### 11.2.4 Pull the Develop Branch Docker Images
+#### 10.2.4 Pull the Develop Branch Docker Images
 
 ```bash
 docker pull oaisoftwarealliance/oai-amf:develop
@@ -944,14 +949,14 @@ docker pull mysql:8.0
 
 > **Note:** The `:develop` tag is a rolling release. Images pulled at different times may behave differently. If you encounter issues, check the OAI CN release notes.
 
-#### 11.2.5 Start the Per-Slice CN
+#### 10.2.5 Start the Per-Slice CN
 
 ```bash
 cd ~/oai-cn5g-fed/docker-compose/
 docker compose -f docker-compose-slicing-basic-nrf.yaml up -d
 ```
 
-#### 11.2.6 Verify All Containers Are Running
+#### 10.2.6 Verify All Containers Are Running
 
 ```bash
 docker ps -a
@@ -977,7 +982,7 @@ mysql             (192.168.70.131)
 
 > **Important:** The AMF IP remains `192.168.70.132` — the same as in the legacy setup. **No changes are needed** to the gNB config file (`ORANSlice.gnb.sa.band78.fr1.106PRB.usrpx310.conf`).
 
-#### 11.2.7 Wait for the CN to Be Ready
+#### 10.2.7 Wait for the CN to Be Ready
 
 The NSSF and NRF need time to register all NFs. Wait about 60 seconds, then check:
 
@@ -1098,10 +1103,10 @@ The most complete ORANSlice demonstration combines both layers:
 - **RAN layer**: PRB ratio control via `rrmPolicy.json` (Step 10)
 
 Run both simultaneously:
-1. Start the per-slice CN (Step 11.2.5)
+1. Start the per-slice CN (Step 10.2.5)
 2. Apply the RAN slicing patch if not already done (Step 5.1)
-3. Start the gNB and both UEs (Steps 6–9)
-4. Connect both UEs, then change `rrmPolicy.json` to shift PRB allocation (Step 10.2)
+3. Start the gNB and both UEs (Steps 6–7)
+4. Connect both UEs, then change `rrmPolicy.json` to shift PRB allocation (Step 9.2)
 5. Run iperf3 on both UEs simultaneously and observe both CN-level isolation (separate UPF logs) and RAN-level throughput differentiation
 
 This is the full end-to-end ORANSlice system as described in the MobiCom '24 paper.
@@ -1277,7 +1282,3 @@ Once your basic slicing setup is working, you can explore the full ORANSlice fra
 - **OSC Near-RT RIC**: Deploy the O-RAN Software Community RIC for production-like testing
 - **OAI Develop Branch CN**: Upgrade to dedicated SMF+UPF per slice for true CN isolation — see [Step 10](#step-10-core-network-slicing-advanced) above
 - **Multiple UEs**: Run more UEs by copying `nrUE_slice1.conf`, changing the IMSI to any value from `001010000010768` to `001010000012256` (all pre-provisioned in the database)
-
----
-
-## Troubleshooting
