@@ -410,16 +410,52 @@ The key line is `associated AMF` — this confirms the gNB connected to the Core
 
 For the slicing demo, you need **two UEs running simultaneously**. OAI nrUE only allows one UE per machine by default (they all try to use `oaitun_ue1`). To run **multiple UEs at the same time**, we use **network namespaces** — each UE gets its own isolated network stack.
 
+### 7.1 What Are Network Namespaces?
+
+**Network namespaces** are a **Linux kernel feature** that provides isolation of network resources. Think of it as a **virtual bubble** of network resources:
+
+- Each namespace has its own: network interfaces, IP addresses, routing tables, firewall rules, ports
+- Processes running inside a namespace can only see/modify resources in that namespace
+- This is the same technology that Docker uses internally to isolate containers
+
+**Without namespaces (the problem):**
+```
+Host machine
+└── oaitun_ue1 (only ONE exists, IP either 12.1.1.x OR 12.1.2.x)
+
+Both UEs try to bind to the same oaitun_ue1 — the second UE overwrites the first's IP.
+```
+
+**With namespaces (the solution):**
+```
+Host machine
+├── namespace ue1
+│   └── oaitun_ue1 → IP 12.1.1.2 (Slice 1)
+│
+└── namespace ue2
+    └── oaitun_ue1 → IP 12.1.2.2 (Slice 2)
+```
+
+Each namespace has its **own isolated `oaitun_ue1`** with a different IP — no conflict.
+
+**Key commands:**
+```bash
+ip netns list              # list all namespaces
+ip netns exec ue1 <cmd>    # run command inside namespace ue1
+```
+
+**The gNB** runs on the host network (not in any namespace) and communicates with both UEs via their different RFsim server addresses (`10.201.1.100` vs `10.202.1.100`).
+
 > **Note:** This step is required for running 2 UEs simultaneously. If you only need to test a single UE first, see [Appendix A: Single UE Test](#appendix-a-single-ue-test) at the bottom of this guide.
 
-### 7.1 About the multi_ue.sh Script
+### 7.2 About the multi_ue.sh Script
 
 OAI provides a helper script at `oai_ran/tools/scripts/multi-ue.sh` that creates network namespaces for multiple UEs. Each namespace provides:
 - A unique `oaitun_ue1` interface (no conflicts)
 - A unique RFsimulator server address
 - Isolation so UEs don't interfere with each other
 
-### 7.2 Check if multi_ue.sh Exists
+### 7.3 Check if multi_ue.sh Exists
 
 ```bash
 ls ~/ORANSlice/oai_ran/tools/scripts/multi-ue.sh
@@ -439,7 +475,7 @@ mkdir -p ~/ORANSlice/oai_ran/tools/scripts
 cp oai_full/tools/scripts/multi-ue.sh ~/ORANSlice/oai_ran/tools/scripts/
 ```
 
-### 7.3 Start the gNB
+### 7.4 Start the gNB
 
 **Terminal 1** — Start the gNB:
 
@@ -450,7 +486,7 @@ sudo ./nr-softmodem \
   --sa --rfsim
 ```
 
-### 7.4 Create Both Namespaces First
+### 7.5 Create Both Namespaces First
 
 **Important:** Create **both** namespaces **before** starting any UE.
 
@@ -470,7 +506,7 @@ sudo ./multi-ue.sh -c2    # create namespace ue2
 
 Now both namespaces exist. Start the UEs.
 
-### 7.5 Run UE Slice 1 (Inside Namespace ue1)
+### 7.6 Run UE Slice 1 (Inside Namespace ue1)
 
 **Terminal 2** — Enter namespace ue1 and start UE Slice 1:
 
@@ -498,7 +534,7 @@ sudo ./nr-uesoftmodem \
 
 Leave this terminal open and running. UE Slice 1 is now connected.
 
-### 7.6 Run UE Slice 2 (Inside Namespace ue2)
+### 7.7 Run UE Slice 2 (Inside Namespace ue2)
 
 **Terminal 3** — Enter namespace ue2 and start UE Slice 2:
 
