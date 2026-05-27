@@ -40,7 +40,7 @@ DB_NAME = "oai_db"
 DEFAULT_KEY = "fec86ba6eb707ed08905757b1bb44b8f"
 DEFAULT_OPC = "C42449363BBAD02B66D16BC975D77CC1"
 PLMN_ID     = "00101"
-MAX_NS      = 2
+MAX_NS      = 9  # multi-ue.sh hard limit; increase if script is extended
 
 SLICE_CONFIG = {
     "slice1": {"dnn": "oai",  "sst": 1, "sd": None, "subnet": "12.1.1", "sd_hex": "0xFFFFFF"},
@@ -500,10 +500,14 @@ def print_ns_table(namespaces: list) -> None:
     table.add_column("RFSim Addr")
     table.add_column("Enter Command")
 
-    rfsim_map = {"ue1": "10.201.1.100", "ue2": "10.202.1.100"}
     for ns in namespaces:
-        rfsim = rfsim_map.get(ns, "?")
-        cmd = f"sudo bash {MULTI_UE_SCRIPT} -o{ns[-1]}" if ns.startswith("ue") else "?"
+        if ns.startswith("ue") and ns[2:].isdigit():
+            n = int(ns[2:])
+            rfsim = f"10.{200 + n}.1.100"
+            cmd = f"sudo bash {MULTI_UE_SCRIPT} -o{n}"
+        else:
+            rfsim = "?"
+            cmd = "?"
         table.add_row(ns, rfsim, cmd)
     console.print(table)
 
@@ -684,7 +688,7 @@ def _wizard_create_namespace() -> None:
         n = int(choice)
         create_namespace(n)
         rprint(f"[green]Created namespace ue{n}[/]")
-        rfsim = "10.201.1.100" if n == 1 else "10.202.1.100"
+        rfsim = f"10.{200 + n}.1.100"
         console.print(Panel(
             f"Enter namespace:  sudo bash {MULTI_UE_SCRIPT} -o{n}\n\n"
             f"Then run UE with:  --rfsimulator.serveraddr {rfsim}",
