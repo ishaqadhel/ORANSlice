@@ -163,7 +163,7 @@ def create_ue(imsi: str, key: str, opc: str, sst: int, sd, dnn: str, static_ip: 
             (ueid, servingPlmnid, singleNssai, dnnConfigurations)
         VALUES (%s, %s, %s, %s)
     """
-    nssai_json = json.dumps({"sst": 1, "sd": "0"})
+    nssai_json = json.dumps({"sst": sst, "sd": str(sd) if sd is not None else "0"})
     dnn_json = _build_dnn_conf(dnn, static_ip)
 
     with get_db() as conn:
@@ -721,7 +721,8 @@ def _wizard_delete_namespace() -> None:
             rprint("[yellow]Cancelled.[/]")
             return
 
-        n = int(ns[-1]) if ns[-1].isdigit() else None
+        suffix = ns[2:] if ns.startswith("ue") else ""
+        n = int(suffix) if suffix.isdigit() else None
         if n is None:
             rprint(f"[red]Cannot parse namespace index from '{ns}'[/]")
             return

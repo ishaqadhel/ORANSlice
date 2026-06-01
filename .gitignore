@@ -1,0 +1,21 @@
+# OAI runtime stats logs
+*.log
+nrL1_stats.log
+nrL1_UE_stats-*.log
+nrMAC_stats.log
+nrRRC_stats.log
+
+# Python
+tools/cli/.venv/
+tools/cli/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Build dependencies (install from source, not tracked)
+oai_cn/oai-cn5g-legacy/protobuf-c/
+
+# CLI-generated UE conf files (created dynamically by oranslice_cli.py)
+oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_[0-9]*.conf
+
+# Patch artifact (correct location is repo root rrmPolicy.json)
+oai_ran/rrmPolicy.json

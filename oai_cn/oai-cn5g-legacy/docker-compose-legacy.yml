@@ -4,6 +4,7 @@ services:
         container_name: "mysql"
         image: mysql:8.0
         volumes:
+            - oai_db_data:/var/lib/mysql
             - ./database/oai_db.sql:/docker-entrypoint-initdb.d/oai_db.sql
             - ./healthscripts/mysql-healthcheck.sh:/tmp/mysql-healthcheck.sh
         environment:
@@ -245,3 +246,5 @@ networks:
                 - subnet: 192.168.70.128/26
         driver_opts:
             com.docker.network.bridge.name: "demo-oai"
+volumes:
+    oai_db_data:

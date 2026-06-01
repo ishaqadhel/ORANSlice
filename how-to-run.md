@@ -25,7 +25,9 @@ This guide walks you through setting up a complete 5G network slicing system usi
 11. [Step 8: Verify Both UEs Connectivity](#step-8-verify-both-ues-connectivity)
 12. [Step 9: Network Slicing with ORANSlice](#step-9-network-slicing-with-oranslice)
 13. [Step 10: Core Network Slicing (Advanced)](#step-10-core-network-slicing-advanced)
-14. [Appendix A: Single UE Test](#appendix-a-single-ue-test)
+14. [Step 11: UE Management with the CLI](#step-11-ue-management-with-the-cli)
+15. [Step 12: Stop and Restart Everything](#step-12-stop-and-restart-everything)
+16. [Appendix A: Single UE Test](#appendix-a-single-ue-test)
 
 ---
 
@@ -179,7 +181,14 @@ cd ~/ORANSlice/oai_cn/oai-cn5g-legacy/
 What `restart_cn.sh` does internally:
 1. Stops any running CN containers
 2. Starts all containers (mysql, oai-nrf, oai-udr, oai-udm, oai-ausf, oai-amf, oai-smf, oai-spgwu-tiny, oai-ext-dn)
-3. Adds a secondary IP address (`12.1.2.1/24`) to the UPF container for Slice 2
+3. Waits for `oai-spgwu-tiny` to be healthy (health check loop)
+4. Waits for MySQL to have subscriber data populated (UDR readiness check)
+5. Adds a secondary IP address (`12.1.2.1/24`) to the UPF container for Slice 2
+6. Adds masquerade rule for Slice 2 traffic
+
+> **Important:** `restart_cn.sh` takes ~2–3 minutes because it waits for the database to be fully initialized before declaring the CN ready. Do not start the gNB until the script prints `[restart_cn] Core Network ready.`
+
+> **DB persistence:** Subscriber data (including CLI-created UEs) is stored in a named Docker volume (`oai_db_data`) that survives restarts. To reset the database to the factory SQL: `docker compose -f docker-compose-legacy.yml down -v`
 
 ### 2.4 Verify the Core Network Is Running
 
@@ -316,31 +325,52 @@ Both files should exist and have non-zero size.
 
 ## Step 5: Configure the gNB Config File
 
-The gNB config file needs one important update: the path to `rrmPolicy.json`.
+### 5.1 Create the Slicing Policy File
 
-### 5.1 Apply the Slicing Patch
-
-This patch enables the gNB to periodically read a JSON file to update its slicing policy (without needing the full xApp/RIC setup):
+Create `rrmPolicy.json` at the repo root:
 
 ```bash
-cd ~/ORANSlice
-git apply doc/rrmPolicyJson.patch
+cat > ~/ORANSlice/rrmPolicy.json << 'EOF'
+{
+	"rrmPolicyRatio" :
+	[
+		{
+			"sst":1,
+			"dedicated_ratio":5,
+			"min_ratio":10,
+			"max_ratio":100
+		},
+		{
+			"sst":1,
+			"sd":1,
+			"dedicated_ratio":5,
+			"min_ratio":10,
+			"max_ratio":100
+		},
+		{
+			"sst":1,
+			"sd":2,
+			"dedicated_ratio":5,
+			"min_ratio":10,
+			"max_ratio":100
+		}
+	]
+}
+EOF
 ```
 
-This does two things:
-1. Creates `~/ORANSlice/rrmPolicy.json` — the slicing policy file
-2. Modifies the gNB scheduler to read this file periodically
+> **Note:** Optionally apply `doc/rrmPolicyJson.patch` to enable dynamic policy reloading (requires rebuilding OAI). For basic testing, the file above is sufficient.
 
 ### 5.2 Update the Path in the gNB Config
 
-The gNB config file currently points to `/home/wineslab/ORANSlice/rrmPolicy.json`. Update it to your actual home directory:
+The gNB config file's `SliceConf` must point to the correct path. Update it:
 
 ```bash
 ORAN_PATH="$HOME/ORANSlice"
 CONFIG_FILE="$ORAN_PATH/oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/ORANSlice.gnb.sa.band78.fr1.106PRB.usrpx310.conf"
 
 # Update the SliceConf path
-sed -i "s|/home/wineslab/ORANSlice|$ORAN_PATH|g" "$CONFIG_FILE"
+sed -i "s|SliceConf = \".*\"|SliceConf = \"$ORAN_PATH/rrmPolicy.json\"|" "$CONFIG_FILE"
 
 # Verify the change
 grep "SliceConf" "$CONFIG_FILE"
@@ -375,32 +405,26 @@ If the IP shown is not `192.168.70.129`, update the `GNB_IPV4_ADDRESS_FOR_NG_AMF
 
 ## Step 6: Run the gNB
 
-Open a **new terminal window** (Terminal 1 — keep it open throughout).
+Use the provided script to start the gNB in the background:
 
 ```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-
-sudo ./nr-softmodem \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/ORANSlice.gnb.sa.band78.fr1.106PRB.usrpx310.conf \
-  --sa \
-  --rfsim
+cd ~/ORANSlice
+sudo ./start_ran.sh
 ```
 
-**Parameter explanation:**
-- `-O <config>` — path to the gNB configuration file
-- `--sa` — Standalone mode (5G SA, not NSA with 4G)
-- `--rfsim` — use the software radio frequency simulator
+This launches the gNB with output to `/tmp/gnb.log`.
 
-### What to Look For
-
-The gNB starts successfully when you see messages like:
-```
-[NR_RRC]   Activated cell, gNB-CU
-[NGAP]   [gNB 0] Received NGAP_REGISTER_GNB_CNF: associated AMF
-[NR_RRC]   Cell 0 is up
+**Wait ~20 seconds**, then verify the gNB associated with the AMF:
+```bash
+grep "NGAP_REGISTER_GNB_CNF" /tmp/gnb.log
 ```
 
-The key line is `associated AMF` — this confirms the gNB connected to the Core Network.
+Expected output:
+```
+[GNB_APP]   [gNB 0] Received NGAP_REGISTER_GNB_CNF: associated AMF 1
+```
+
+Monitor live: `tail -f /tmp/gnb.log | grep -E 'AMF|RRC|NGAP|ERROR'`
 
 > **If you see "Connection refused" or NGAP errors:** The CN may not be fully ready. Wait 30 more seconds and restart the gNB.
 
@@ -408,7 +432,7 @@ The key line is `associated AMF` — this confirms the gNB connected to the Core
 
 ## Step 7: Run Multiple UEs Using Network Namespaces
 
-For the slicing demo, you need **two UEs running simultaneously**. OAI nrUE only allows one UE per machine by default (they all try to use `oaitun_ue1`). To run **multiple UEs at the same time**, we use **network namespaces** — each UE gets its own isolated network stack.
+For the slicing demo, you need **two UEs running simultaneously**. OAI nrUE only allows one UE per machine by default (they all try to use `oaitun_ue1`). To run **multiple UEs at the same time**, we use **network namespaces**.
 
 ### 7.1 What Are Network Namespaces?
 
@@ -448,118 +472,53 @@ ip netns exec ue1 <cmd>    # run command inside namespace ue1
 
 > **Note:** This step is required for running 2 UEs simultaneously. If you only need to test a single UE first, see [Appendix A: Single UE Test](#appendix-a-single-ue-test) at the bottom of this guide.
 
-### 7.2 About the multi_ue.sh Script
+### 7.2 Critical: Start UEs Sequentially (One at a Time)
 
-OAI provides a helper script at `oai_ran/tools/scripts/multi-ue.sh` that creates network namespaces for multiple UEs. Each namespace provides:
-- A unique `oaitun_ue1` interface (no conflicts)
-- A unique RFsimulator server address
-- Isolation so UEs don't interfere with each other
+> **Important:** OAI RFSim has a known instability when multiple UEs connect simultaneously. Always start UEs one at a time, waiting for each to receive a PDU session (get an IP on `oaitun_ue1`) before starting the next one.
 
-### 7.3 Check if multi_ue.sh Exists
+Use the provided `run_ues.sh` script which handles this automatically:
 
 ```bash
-ls ~/ORANSlice/oai_ran/tools/scripts/multi-ue.sh
+cd ~/ORANSlice
+CONFDIR="oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF"
+
+sudo ./run_ues.sh \
+  "1:$CONFDIR/nrUE_slice1.conf" \
+  "2:$CONFDIR/nrUE_slice2.conf"
 ```
 
-If the file doesn't exist, get it from the OAI repository:
+The script creates namespaces, starts each UE, and waits for its PDU session before starting the next. Expected output:
+
+```
+[start_ue] creating namespace ue1
+[start_ue] starting UE in ue1 → 10.201.1.100  conf: nrUE_slice1.conf
+[start_ue] UE PID 12345 — waiting for PDU session (oaitun_ue1)...
+[start_ue] ue1 connected — oaitun_ue1 12.1.1.2/24  log: /tmp/ue1.log
+[start_ue] creating namespace ue2
+[start_ue] starting UE in ue2 → 10.202.1.100  conf: nrUE_slice2.conf
+[start_ue] UE PID 12367 — waiting for PDU session (oaitun_ue1)...
+[start_ue] ue2 connected — oaitun_ue1 12.1.2.2/24  log: /tmp/ue2.log
+[run_ues] all UEs connected.
+```
+
+### 7.3 Manual UE Launch (alternative to run_ues.sh)
+
+If you prefer manual control, create each namespace and start each UE individually, waiting between them:
+
+**Create namespace ue1 and start UE Slice 1:**
 
 ```bash
-# Clone the OAI repository (separate from ORANSlice)
-cd ~
-git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git oai_full
-
-# Create the target directory in ORANSlice
-mkdir -p ~/ORANSlice/oai_ran/tools/scripts
-
-# Copy only multi-ue.sh (multi-ue.d may not exist in newer OAI versions)
-cp oai_full/tools/scripts/multi-ue.sh ~/ORANSlice/oai_ran/tools/scripts/
+sudo bash oai_ran/tools/scripts/multi-ue.sh -c1
+sudo ./start_ue.sh 1 oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf
 ```
 
-### 7.4 Start the gNB
+Wait for `[start_ue] ue1 connected`, then:
 
-**Terminal 1** — Start the gNB:
+**Create namespace ue2 and start UE Slice 2:**
 
 ```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-sudo ./nr-softmodem \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/ORANSlice.gnb.sa.band78.fr1.106PRB.usrpx310.conf \
-  --sa --rfsim
+sudo ./start_ue.sh 2 oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice2.conf
 ```
-
-### 7.5 Create Both Namespaces First
-
-**Important:** Create **both** namespaces **before** starting any UE.
-
-**Terminal 2** — Create namespace for UE Slice 1:
-
-```bash
-cd ~/ORANSlice/oai_ran/tools/scripts
-sudo ./multi-ue.sh -c1    # create namespace ue1
-```
-
-**Terminal 3** — Create namespace for UE Slice 2:
-
-```bash
-cd ~/ORANSlice/oai_ran/tools/scripts
-sudo ./multi-ue.sh -c2    # create namespace ue2
-```
-
-Now both namespaces exist. Start the UEs.
-
-### 7.6 Run UE Slice 1 (Inside Namespace ue1)
-
-**Terminal 2** — Enter namespace ue1 and start UE Slice 1:
-
-```bash
-sudo ./multi-ue.sh -o1    # enter shell inside namespace ue1
-```
-
-Inside the namespace, run UE Slice 1:
-
-```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-
-sudo ./nr-uesoftmodem \
-  -r 106 \
-  --numerology 1 \
-  --band 78 \
-  -C 3619200000 \
-  --sa \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf \
-  --rfsim \
-  --rfsimulator.serveraddr 10.201.1.100
-```
-
-> **Note:** The `--telnetsrv` and `--telnetsrv.listenport` options are optional and may not be available in all builds. If omitted, the telnet server simply won't run — the UE will still work normally.
-
-Leave this terminal open and running. UE Slice 1 is now connected.
-
-### 7.7 Run UE Slice 2 (Inside Namespace ue2)
-
-**Terminal 3** — Enter namespace ue2 and start UE Slice 2:
-
-```bash
-cd ~/ORANSlice/oai_ran/tools/scripts
-sudo ./multi-ue.sh -o2    # enter shell inside namespace ue2
-```
-
-Inside the namespace, run UE Slice 2:
-
-```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-
-sudo ./nr-uesoftmodem \
-  -r 106 \
-  --numerology 1 \
-  --band 78 \
-  -C 3619200000 \
-  --sa \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice2.conf \
-  --rfsim \
-  --rfsimulator.serveraddr 10.202.1.100
-```
-
-Both UEs are now running simultaneously. Keep both terminals open.
 
 ---
 
@@ -574,29 +533,26 @@ Active slices for UE e13d = [ 2 ]   # Slice 2 UE
 
 ### 8.1 Verify Each UE's IP Address
 
-Each UE has its own tunnel interface inside its namespace. Check via telnet or see UE logs.
+```bash
+# Check UE1 (Slice 1 — should be 12.1.1.x)
+ip netns exec ue1 ip addr show oaitun_ue1 | grep inet
 
-You should see:
-- UE Slice 1: IP in `12.1.1.x` range
-- UE Slice 2: IP in `12.1.2.x` range
+# Check UE2 (Slice 2 — should be 12.1.2.x)
+ip netns exec ue2 ip addr show oaitun_ue1 | grep inet
+```
 
 ### 8.2 Test Connectivity Per Slice
 
-To test connectivity, run commands inside each namespace:
-
 ```bash
+# Test Slice 1 UE — ping oai-ext-dn (CN side)
+ip netns exec ue1 ping -I oaitun_ue1 -c 5 192.168.70.135
 
-cd ~/ORANSlice/oai_ran/tools/scripts
+# Test Slice 2 UE — ping oai-ext-dn (CN side)
+ip netns exec ue2 ping -I oaitun_ue1 -c 5 192.168.70.135
 
-# Test Slice 1 UE (inside namespace ue1)
-sudo ./multi-ue.sh -o1
-ping -I oaitun_ue1 -c 5 192.168.70.135
-exit
-
-# Test Slice 2 UE (inside namespace ue2)
-sudo ./multi-ue.sh -o2
-ping -I oaitun_ue1 -c 5 192.168.70.135
-exit
+# Test internet connectivity from both UEs
+ip netns exec ue1 ping -I oaitun_ue1 -c 5 8.8.8.8
+ip netns exec ue2 ping -I oaitun_ue1 -c 5 8.8.8.8
 ```
 
 ### 8.3 iperf3 Throughput Test
@@ -606,27 +562,15 @@ exit
 docker exec -it oai-ext-dn iperf3 -s
 ```
 
-**Run iperf3 for Slice 1 (inside namespace ue1):**
+**Run iperf3 for Slice 1:**
 ```bash
-sudo ./multi-ue.sh -o1
-iperf3 -c 192.168.70.135 -B 12.1.1.x -t 60 -i 5
-exit
+ip netns exec ue1 iperf3 -c 192.168.70.135 -B 12.1.1.x -t 60 -i 5
 ```
 
-**Run iperf3 for Slice 2 (inside namespace ue2):**
+**Run iperf3 for Slice 2 (second server instance needed):**
 ```bash
-sudo ./multi-ue.sh -o2
-iperf3 -c 192.168.70.135 -B 12.1.2.x -t 60 -i 5
-exit
-```
-
-### 8.4 Clean Up Namespaces
-
-When done, exit the namespace shells normally (Ctrl+C or `exit`). To remove the namespaces:
-
-```bash
-sudo ./multi-ue.sh -d1    # remove namespace ue1
-sudo ./multi-ue.sh -d2    # remove namespace ue2
+docker exec -it oai-ext-dn iperf3 -s -p 5202 &
+ip netns exec ue2 iperf3 -c 192.168.70.135 -B 12.1.2.x -t 60 -i 5 -p 5202
 ```
 
 ---
@@ -636,8 +580,6 @@ sudo ./multi-ue.sh -d2    # remove namespace ue2
 ORANSlice controls **RAN slicing** by dividing radio resources (Physical Resource Blocks) among slices. The slicing policy is defined in `rrmPolicy.json`.
 
 ### 9.1 Understand the Slicing Policy File
-
-After applying the patch in Step 5.1, you have:
 
 ```bash
 cat ~/ORANSlice/rrmPolicy.json
@@ -678,7 +620,7 @@ Output:
 - `min_ratio` — minimum PRB ratio the scheduler can assign
 - `max_ratio` — maximum PRB ratio the scheduler can assign
 
-The **gNB reads this file every ~1280 frames (~13 seconds)** and updates its scheduler automatically.
+> **Note:** Dynamic policy reloading (gNB reads this file every ~13s) requires applying `doc/rrmPolicyJson.patch` and rebuilding OAI. Without the patch, the policy is read at startup only.
 
 ### 9.2 Test Slice Prioritization
 
@@ -719,18 +661,18 @@ Change the ratios so Slice 1 (sd=0xFFFFFF, omitted) gets 80% and Slice 2 (sd=2) 
 }
 ```
 
-Save and exit. Wait about 15 seconds for the gNB to pick up the change (no restart needed).
+Save and exit. Wait about 15 seconds for the gNB to pick up the change (no restart needed, requires patch).
 
 ### 9.3 Measure the Throughput Difference
 
 **Terminal for Slice 1 iperf3 client:**
 ```bash
-iperf3 -c 192.168.70.135 -B 12.1.1.11 -t 60 -i 5
+ip netns exec ue1 iperf3 -c 192.168.70.135 -B 12.1.1.11 -t 60 -i 5
 ```
 
 **Terminal for Slice 2 iperf3 client (simultaneously):**
 ```bash
-iperf3 -c 192.168.70.135 -B 12.1.2.11 -t 60 -i 5 -p 5202
+ip netns exec ue2 iperf3 -c 192.168.70.135 -B 12.1.2.11 -t 60 -i 5 -p 5202
 ```
 
 > For the second iperf3 test, start a second server on a different port inside oai-ext-dn:
@@ -938,7 +880,7 @@ If the legacy CN is running, stop it first:
 
 ```bash
 cd ~/ORANSlice/oai_cn/oai-cn5g-legacy/
-docker compose -f docker-compose-legacy.yml down
+./stop_cn.sh
 ```
 
 #### 10.2.2 Clone the OAI CN Develop Repository
@@ -1037,31 +979,7 @@ docker logs oai-smf-slice2 2>&1 | grep -i "started\|upf\|registered" | tail -5
 
 ### 10.3 Run the System with the Per-Slice CN
 
-The gNB and nrUE commands are **identical** to Steps 6–9. Run them in the same way:
-
-**Terminal 1 — gNB (no change from Step 6):**
-```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-sudo ./nr-softmodem \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/ORANSlice.gnb.sa.band78.fr1.106PRB.usrpx310.conf \
-  --sa --rfsim
-```
-
-**Terminal 2 — nrUE Slice 1 (no change from Step 7):**
-```bash
-sudo ./nr-uesoftmodem \
-  -r 106 --numerology 1 --band 78 -C 3619200000 --sa \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf \
-  --rfsim --rfsimulator.serveraddr 127.0.0.1
-```
-
-**Terminal 3 — nrUE Slice 2 (no change from Step 9):**
-```bash
-sudo ./nr-uesoftmodem \
-  -r 106 --numerology 1 --band 78 -C 3619200000 --sa \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice2.conf \
-  --rfsim --rfsimulator.serveraddr 127.0.0.1
-```
+The gNB and nrUE commands are **identical** to Steps 6–9. Run them in the same way.
 
 ---
 
@@ -1095,10 +1013,10 @@ docker exec oai-upf-slice2 ip addr show | grep "12.1.2"
 
 ```bash
 # Slice 1 UE — traffic goes through UPF-slice1
-ping -I oaitun_ue1 -c 5 192.168.70.135
+ip netns exec ue1 ping -I oaitun_ue1 -c 5 192.168.70.135
 
 # Slice 2 UE — traffic goes through UPF-slice2
-ping -I oaitun_ue2 -c 5 192.168.70.135
+ip netns exec ue2 ping -I oaitun_ue1 -c 5 192.168.70.135
 ```
 
 #### Prove fault isolation
@@ -1110,10 +1028,10 @@ Stop SMF-slice2 and verify Slice 1 is completely unaffected:
 docker stop oai-smf-slice2
 
 # Slice 1 UE should still ping successfully
-ping -I oaitun_ue1 -c 5 192.168.70.135
+ip netns exec ue1 ping -I oaitun_ue1 -c 5 192.168.70.135
 
 # Slice 2 UE will lose connectivity (expected)
-ping -I oaitun_ue2 -c 5 192.168.70.135
+ip netns exec ue2 ping -I oaitun_ue1 -c 5 192.168.70.135
 
 # Restart SMF-slice2
 docker start oai-smf-slice2
@@ -1149,6 +1067,134 @@ This is the full end-to-end ORANSlice system as described in the MobiCom '24 pap
 
 ---
 
+## Step 11: UE Management with the CLI
+
+The `tools/cli/oranslice` CLI manages UE subscriptions, network namespaces, and RAN slice policies.
+
+### 11.1 Set Up the CLI
+
+```bash
+cd ~/ORANSlice/tools/cli
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+chmod +x oranslice
+```
+
+> **Requires root.** The CLI handles `sudo` internally via the `oranslice` wrapper.
+
+### 11.2 Launch the CLI
+
+```bash
+cd ~/ORANSlice/tools/cli
+./oranslice
+```
+
+The CLI has an interactive menu:
+- **UE Management** — list, create, delete subscriber entries + generate conf files
+- **Namespace Management** — list, create, delete network namespaces
+- **Slice Management** — view/update RAN slice policy, restart CN
+- **System Status** — health check for all components + connectivity test
+
+### 11.3 Adding New UEs via CLI
+
+Use the CLI to provision a new UE. In the menu, select:
+1. `UE Management` → `Create UE`
+2. Enter IMSI (15 digits, e.g. `001010000010779`)
+3. Use default key/OPC (matches pre-provisioned values)
+4. Assign to Slice 1 or Slice 2
+5. Confirm — CLI inserts DB entry and generates `nrUE_<IMSI>.conf`
+
+After creating the UE, start it with:
+```bash
+cd ~/ORANSlice
+# start_ue.sh <namespace_index> <conf_file>
+sudo ./start_ue.sh 3 oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_001010000010779.conf
+```
+
+Or use `run_ues.sh` to start multiple at once (sequentially):
+```bash
+CONFDIR="oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF"
+sudo ./run_ues.sh \
+  "3:$CONFDIR/nrUE_001010000010779.conf" \
+  "4:$CONFDIR/nrUE_001010000010780.conf" \
+  "5:$CONFDIR/nrUE_001010000010781.conf"
+```
+
+> **DB persistence:** CLI-created UEs are stored in the `oai_db_data` named Docker volume and survive CN restarts. To reset the DB to factory state: `docker compose -f docker-compose-legacy.yml down -v`
+
+### 11.4 Verifying New UEs
+
+After a CLI-created UE connects, test it exactly like the built-in UEs:
+
+```bash
+# Check tunnel (replace 3 with namespace index)
+ip netns exec ue3 ip addr show oaitun_ue1 | grep inet
+
+# Ping tests
+ip netns exec ue3 ping -I oaitun_ue1 -c 4 192.168.70.135  # CN
+ip netns exec ue3 ping -I oaitun_ue1 -c 4 8.8.8.8          # Internet
+```
+
+---
+
+## Step 12: Stop and Restart Everything
+
+### 12.1 Stop All Components
+
+```bash
+cd ~/ORANSlice
+
+# 1. Stop all UEs, gNB, and delete all namespaces
+sudo ./stop_ran.sh
+
+# 2. Stop the Core Network
+sudo ./oai_cn/oai-cn5g-legacy/stop_cn.sh
+```
+
+`stop_ran.sh` handles:
+- Kills `nr-uesoftmodem` (all UE processes)
+- Kills `nr-softmodem` (gNB process)
+- Deletes all `ueN` namespaces (calls `multi-ue.sh -d<N>` for each)
+- Cleans up stale veth interfaces
+
+`stop_cn.sh` handles:
+- Runs `docker compose down` (removes containers, preserves `oai_db_data` volume)
+
+### 12.2 Restart
+
+```bash
+cd ~/ORANSlice
+
+# 1. Start the Core Network (waits for UDR to be ready before returning)
+sudo ./oai_cn/oai-cn5g-legacy/restart_cn.sh
+
+# 2. Start the gNB
+sudo ./start_ran.sh
+
+# Wait ~20s for gNB to associate with AMF, then start UEs
+sleep 20
+
+# 3. Start UEs (sequentially, waits for each PDU session)
+CONFDIR="oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF"
+sudo ./run_ues.sh \
+  "1:$CONFDIR/nrUE_slice1.conf" \
+  "2:$CONFDIR/nrUE_slice2.conf"
+```
+
+### 12.3 Verify After Restart
+
+```bash
+# Both UEs should have tunnel IPs
+ip netns exec ue1 ip addr show oaitun_ue1 | grep inet   # 12.1.1.x
+ip netns exec ue2 ip addr show oaitun_ue1 | grep inet   # 12.1.2.x
+
+# Ping tests
+ip netns exec ue1 ping -I oaitun_ue1 -c 4 192.168.70.135
+ip netns exec ue2 ping -I oaitun_ue1 -c 4 8.8.8.8
+```
+
+---
+
 ## Troubleshooting
 
 ### Core Network container keeps restarting
@@ -1158,7 +1204,7 @@ docker logs <container-name> --tail 50
 ```
 
 Common causes:
-- MySQL is not ready yet (UDR tries to connect too early) — wait 60 seconds and run `./restart_cn.sh` again
+- MySQL is not ready yet (UDR tries to connect too early) — `restart_cn.sh` waits for this automatically; if it still fails, run `./restart_cn.sh` again
 - The `demo-oai-public-net` network does not exist — re-run the `docker network create` command from Step 2.1
 
 ### gNB fails with "NGAP: No route to host" or connection refused
@@ -1178,12 +1224,27 @@ The PDU session (data connection) was not established. Check:
 2. The UE's IMSI is in the database — check `docker logs oai-amf`
 3. The SMF logs: `docker logs oai-smf | tail -30`
 
+### UE crashes after PDU session request (race condition)
+
+OAI RFSim can crash if multiple UEs connect simultaneously. Use `run_ues.sh` or `start_ue.sh` which wait for each UE's PDU session before starting the next one. Never launch multiple UEs in parallel.
+
+### UE stuck in 5GMM-REG-INITIATED after CN restart
+
+The UDR may not have been ready when authentication was attempted. Restart the UE process:
+```bash
+pkill -f "nr-uesoftmodem.*<conf_filename>"
+sleep 3
+sudo ./start_ue.sh <ns_index> <conf_file>
+```
+
+`restart_cn.sh` now waits for the database to be populated before returning, which prevents this in normal use.
+
 ### ping fails through oaitun_ue1
 
-1. Verify the UE has an IP: `ip addr show oaitun_ue1`
-2. Verify routing: `ip route | grep oaitun`
+1. Verify the UE has an IP: `ip netns exec ueN ip addr show oaitun_ue1`
+2. Verify routing: `ip netns exec ueN ip route | grep oaitun`
 3. Check if the UPF has the route for the UE subnet: `docker exec oai-spgwu-tiny ip route`
-4. Try adding a route manually if missing: `sudo ip route add 12.1.1.0/24 dev oaitun_ue1`
+4. Try adding a route manually if missing: `ip netns exec ueN sudo ip route add 12.1.1.0/24 dev oaitun_ue1`
 
 ### Build fails during `build_oai`
 
@@ -1196,49 +1257,22 @@ The PDU session (data connection) was not established. Check:
 
 ### rrmPolicy.json changes are not applied
 
-1. Verify the patch was applied: `ls ~/ORANSlice/rrmPolicy.json`
+1. Verify the file exists: `ls ~/ORANSlice/rrmPolicy.json`
 2. Verify `SliceConf` in the gNB config points to the correct path: `grep SliceConf <gNB_conf_file>`
-3. The gNB reads the file every ~1280 frames (~13 seconds at 100 frames/sec). Wait at least 30 seconds after editing.
-4. Check gNB logs for `update_slice_policy` messages.
+3. Dynamic reloading requires applying `doc/rrmPolicyJson.patch` and rebuilding OAI. Without the patch, the policy is read at startup only.
 
-### Develop branch CN: UE connects to AMF but session establishment fails
+### CLI-created UEs lost after CN restart
 
-The NSSF may not have completed NF registration. Check:
-
-```bash
-# NSSF must be up and registered
-docker logs oai-nssf 2>&1 | tail -20
-
-# AMF must have discovered the NSSF
-docker logs oai-amf 2>&1 | grep -i "nssf\|slice" | tail -10
-
-# SMF must have registered its slice info with NRF
-docker logs oai-smf-slice1 2>&1 | grep -i "nrf\|register" | tail -5
-docker logs oai-smf-slice2 2>&1 | grep -i "nrf\|register" | tail -5
-```
-
-If the NSSF is still starting, wait 30 more seconds and try reconnecting the UE.
-
-### Develop branch CN: UE Slice 2 gets IP in 12.1.1.x instead of 12.1.2.x
-
-The NSSF is routing the Slice 2 UE to SMF-slice1 instead of SMF-slice2. Verify:
-
-1. The UE config `nrUE_slice2.conf` has `nssai_sd=0x2` set (not just `nssai_sst=1`)
-2. The patch was applied correctly: `grep -A2 "slice2" ~/oai-cn5g-fed/docker-compose/conf/slicing_slice2_config.yaml | grep sd`
-3. Restart both SMFs to force NRF re-registration: `docker restart oai-smf-slice1 oai-smf-slice2`
+With the named `oai_db_data` volume, CLI UEs now survive CN restarts. If you wiped the volume (`docker compose down -v`), you need to re-create the UEs via the CLI. The base UEs (10776, 10777 etc.) are always restored from `oai_db.sql` on fresh starts.
 
 ### Stopping Everything
 
 To stop the entire system cleanly:
 
 ```bash
-# Stop the nrUE processes (Ctrl+C in each terminal)
-
-# Stop the gNB process (Ctrl+C in Terminal 1)
-
-# Stop the Core Network
-cd ~/ORANSlice/oai_cn/oai-cn5g-legacy/
-docker compose -f docker-compose-legacy.yml down
+cd ~/ORANSlice
+sudo ./stop_ran.sh
+sudo ./oai_cn/oai-cn5g-legacy/stop_cn.sh
 ```
 
 ---
@@ -1249,9 +1283,9 @@ When everything is running, you should have these terminal windows open:
 
 | Terminal | Running | Command |
 |----------|---------|---------|
-| Terminal 1 | OAI gNB | `sudo ./nr-softmodem ... --rfsim` |
-| Terminal 2 | nrUE Slice 1 (namespace ue1) | `sudo ./multi-ue.sh -o1` then run UE |
-| Terminal 3 | nrUE Slice 2 (namespace ue2) | `sudo ./multi-ue.sh -o2` then run UE |
+| Terminal 1 | OAI gNB | `sudo ./start_ran.sh` (background) |
+| Terminal 2 | nrUE Slice 1 (namespace ue1) | `sudo ./run_ues.sh "1:...nrUE_slice1.conf"` |
+| Terminal 3 | nrUE Slice 2 (namespace ue2) | started by `run_ues.sh` above |
 | Terminal 4 | iperf3 server (in Docker) | `docker exec -it oai-ext-dn iperf3 -s` |
 
 The Core Network runs in the background via Docker.
@@ -1262,41 +1296,31 @@ The Core Network runs in the background via Docker.
 
 If you only want to test a single UE (Slice 1) without setting up namespaces:
 
-### Run the gNB (Terminal 1)
+### Run the gNB
 
 ```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-sudo ./nr-softmodem \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/ORANSlice.gnb.sa.band78.fr1.106PRB.usrpx310.conf \
-  --sa --rfsim
+cd ~/ORANSlice
+sudo ./start_ran.sh
+sleep 20  # wait for AMF association
 ```
 
-### Run the nrUE (Terminal 2)
+### Run the nrUE
 
 ```bash
-cd ~/ORANSlice/oai_ran/cmake_targets/ran_build/build
-
-sudo ./nr-uesoftmodem \
-  -r 106 \
-  --numerology 1 \
-  --band 78 \
-  -C 3619200000 \
-  --sa \
-  -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf \
-  --rfsim \
-  --rfsimulator.serveraddr 127.0.0.1
+sudo ./start_ue.sh 1 oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf
 ```
 
 ### Verify UE Connectivity
 
 ```bash
-ip addr show oaitun_ue1    # Should show IP in 12.1.1.x range
-ping -I oaitun_ue1 -c 5 192.168.70.135    # Test connectivity
+ip netns exec ue1 ip addr show oaitun_ue1    # Should show IP in 12.1.1.x range
+ip netns exec ue1 ping -I oaitun_ue1 -c 5 192.168.70.135    # Test CN connectivity
+ip netns exec ue1 ping -I oaitun_ue1 -c 5 8.8.8.8           # Test internet
 ```
 
 ### What to Look For
 
-A successful connection shows:
+A successful connection shows in `/tmp/ue1.log`:
 ```
 [NAS]   Received PDU Session Establishment Accept
 [NR_RRC]   State = NR_RRC_CONNECTED
@@ -1317,4 +1341,4 @@ Once your basic slicing setup is working, you can explore the full ORANSlice fra
 - **E2Sim + xApp**: Automate slicing control via the O-RAN Near-RT RIC (see [README.md](README.md) for links)
 - **OSC Near-RT RIC**: Deploy the O-RAN Software Community RIC for production-like testing
 - **OAI Develop Branch CN**: Upgrade to dedicated SMF+UPF per slice for true CN isolation — see [Step 10](#step-10-core-network-slicing-advanced) above
-- **Multiple UEs**: Run more UEs by copying `nrUE_slice1.conf`, changing the IMSI to any value from `001010000010768` to `001010000012256` (all pre-provisioned in the database)
+- **Multiple UEs**: Run more UEs by using the CLI to create them and `run_ues.sh` to launch them. Each new UE needs a unique IMSI in the database (CLI handles this automatically).
