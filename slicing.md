@@ -1,4 +1,30 @@
-# ORANSlice: Slicing Architecture
+# ORANSlice — Slicing Architecture
+
+> For running the system see `how-to-run.md`. For first-time setup see `installation.md`.
+
+## Key Terms
+
+| Term | Meaning |
+|------|---------|
+| **NSSAI** | Network Slice Selection Assistance Info — identifies a slice |
+| **SST** | Slice/Service Type (e.g. 1 = eMBB) |
+| **SD** | Slice Differentiator — distinguishes slices with same SST |
+| **DNN** | Data Network Name — like APN in 4G (`oai`, `oai2`) |
+| **PRB** | Physical Resource Block — radio frequency/time unit |
+| **PDU Session** | UE data connection through the core network |
+| **AMF** | Access and Mobility Management — UE registration |
+| **SMF** | Session Management — PDU session lifecycle |
+| **UPF** | User Plane Function — routes user data |
+| **NSSF** | Network Slice Selection Function — routes AMF to correct SMF |
+
+**Slice identity in this setup:**
+
+| Slice | SST | SD | DNN | UE IP range |
+|-------|-----|----|-----|-------------|
+| Slice 1 (default) | 1 | 0xFFFFFF | `oai` | 12.1.1.x |
+| Slice 2 | 1 | 0x000002 | `oai2` | 12.1.2.x |
+
+---
 
 ## Overview
 
