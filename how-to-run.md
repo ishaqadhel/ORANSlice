@@ -7,17 +7,19 @@
 ## Quick Reference
 
 ```bash
-# Start
-sudo ./oai_cn/oai-cn5g-legacy/restart_cn.sh   # ~2-3 min
-sudo ./start_ran.sh                             # wait ~20s for AMF
-sudo ./run_ues.sh "1:oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf" \
-                  "2:oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice2.conf"
+# 1. Start CN (~2-3 min)
+sudo ./oai_cn/oai-cn5g-legacy/restart_cn.sh
 
-# Verify
+# 2. Start gNB
+sudo ./start_ran.sh
+
+# 3. Manage UEs via CLI (create + run)
+sudo ./tools/cli/oranslice
+
+# 4. Verify
 ip netns exec ue1 ping -I oaitun_ue1 -c 3 192.168.70.135
-ip netns exec ue2 ping -I oaitun_ue1 -c 3 8.8.8.8
 
-# Stop
+# 5. Stop
 sudo ./stop_ran.sh
 sudo ./oai_cn/oai-cn5g-legacy/stop_cn.sh
 ```
@@ -75,40 +77,48 @@ tail -f /tmp/gnb.log | grep -E 'AMF|NGAP|ERROR'
 
 ## 3. Start UEs
 
-> **Critical:** Start UEs one at a time. OAI RFSim crashes when multiple UEs connect simultaneously. `run_ues.sh` handles this automatically — it waits for each UE's PDU session before starting the next.
+> **Critical:** Start UEs one at a time. OAI RFSim crashes when multiple UEs connect simultaneously. The CLI handles this automatically.
+
+### Via CLI (recommended)
+
+```bash
+cd ~/ORANSlice
+sudo ./tools/cli/oranslice
+```
+
+**First time setup:**
+```
+UE Management → Delete Orphan UEs        # remove DB entries with no conf file
+UE Management → Create UE               # IMSI, slice, auto-assigns IP + namespace
+UE Management → Run UE                  # starts nr-uesoftmodem, waits for PDU session
+```
+
+Repeat "Create UE" + "Run UE" for each additional UE. The CLI starts them sequentially — wait for each to connect before running the next.
+
+Each UE gets a tunnel interface `oaitun_ue1` in its namespace:
+- **Slice 1** UE: `12.1.1.x`
+- **Slice 2** UE: `12.1.2.x`
+
+**Namespace-to-RFSim address mapping:**
+
+| Namespace | RFSim addr | Notes |
+|-----------|------------|-------|
+| ue1 | 10.201.1.100 | first created UE |
+| ue2 | 10.202.1.100 | second created UE |
+| ueN | 10.(200+N).1.100 | auto-assigned by CLI |
+
+### Via script (scripted/automated usage)
 
 ```bash
 cd ~/ORANSlice
 CONFDIR="oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF"
 
 sudo ./run_ues.sh \
-  "1:$CONFDIR/nrUE_slice1.conf" \
-  "2:$CONFDIR/nrUE_slice2.conf"
+  "1:$CONFDIR/nrUE_001010000010779.conf" \
+  "2:$CONFDIR/nrUE_001010000010781.conf"
 ```
 
-Expected output:
-```
-[start_ue] creating namespace ue1
-[start_ue] UE PID 12345 — waiting for PDU session (oaitun_ue1)...
-[start_ue] ue1 connected — oaitun_ue1 12.1.1.2/24  log: /tmp/ue1.log
-[start_ue] creating namespace ue2
-[start_ue] UE PID 12367 — waiting for PDU session (oaitun_ue1)...
-[start_ue] ue2 connected — oaitun_ue1 12.1.2.2/24  log: /tmp/ue2.log
-[run_ues] all UEs connected.
-```
-
-Each UE gets a tunnel interface `oaitun_ue1` in its namespace:
-- **ue1** (Slice 1): `12.1.1.x`
-- **ue2** (Slice 2): `12.1.2.x`
-
-**Namespace-to-RFSim address mapping:**
-
-| Namespace | veth host IP | UE conf |
-|-----------|-------------|---------|
-| ue1 | 10.201.1.100 | nrUE_slice1.conf |
-| ue2 | 10.202.1.100 | nrUE_slice2.conf |
-| ue3 | 10.203.1.100 | any |
-| ueN | 10.(200+N).1.100 | any |
+`run_ues.sh` calls `start_ue.sh` for each pair sequentially, waiting for PDU session before starting the next.
 
 ---
 
@@ -153,76 +163,53 @@ ip netns exec ue2 iperf3 -c 192.168.70.135 -B 12.1.2.2 -t 30 -p 5202
 
 ## 5. UE Management (CLI)
 
-The CLI manages subscriber DB entries, UE conf files, and namespaces interactively.
+The CLI is the single tool for managing UEs end-to-end — DB entries, conf files, namespaces, and running processes.
 
 ### Launch
 
 ```bash
-cd ~/ORANSlice/tools/cli
-sudo ./oranslice
+sudo ~/ORANSlice/tools/cli/oranslice
 ```
 
-Menu options:
-- **UE Management** — list, create, delete subscribers
-- **Namespace Management** — list, create, delete namespaces
-- **Slice Management** — view/update `rrmPolicy.json`, restart CN
-- **System Status** — health check + connectivity test
+### UE Management menu actions
 
-### Add a new UE (end-to-end)
+| Action | What it does |
+|--------|-------------|
+| List UEs | Table with SST, SD, DNN, IP, conf file status, assigned namespace |
+| Create UE | Wizard → assigns IP + namespace automatically → writes conf + DB entry |
+| Run UE | Select a single UE or **"Run All"** to start all sequentially — waits for each PDU session (up to 120s each) |
+| Stop UE | Kills `nr-uesoftmodem` process for selected UE |
+| Delete UE | Removes DB entries, conf file, and namespace |
+| Delete Orphan UEs | Bulk-removes DB entries that have no conf file |
 
-**Step 1 — Create subscriber in DB + generate conf file via CLI:**
+### Full workflow (new UE)
 
 ```
-UE Management → Create UE
-  IMSI: 001010000010779   (15 digits, must not already exist in DB)
-  Key/OPC: use defaults
-  Slice: Slice 1  (SST=1, SD=0xFFFFFF, DNN=oai)  or  Slice 2
-  Confirm
-```
+1. UE Management → Create UE
+      IMSI: 001010000010782   (15 digits, not already in DB)
+      Key/OPC: use defaults
+      Slice: Slice 1 or Slice 2
+      → auto-assigns static IP, creates namespace ueN, writes conf
 
-CLI creates:
-- DB entry in `AuthenticationSubscription` + `SessionManagementSubscriptionData`
-- `oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_<IMSI>.conf`
+2. UE Management → Run UE
+      Select IMSI → CLI starts UE, waits for oaitun_ue1 to come up
+      → output shows IP and log path when connected
 
-**Step 2 — Start the UE:**
-
-```bash
-cd ~/ORANSlice
-CONFDIR="oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF"
-
-# Single new UE (pick next available namespace index, e.g. 3)
-sudo ./start_ue.sh 3 "$CONFDIR/nrUE_001010000010779.conf"
-
-# Or add multiple at once (sequentially)
-sudo ./run_ues.sh \
-  "3:$CONFDIR/nrUE_001010000010779.conf" \
-  "4:$CONFDIR/nrUE_001010000010780.conf"
-```
-
-**Step 3 — Verify:**
-
-```bash
-ip netns exec ue3 ip addr show oaitun_ue1 | grep inet
-ip netns exec ue3 ping -I oaitun_ue1 -c 4 192.168.70.135
-ip netns exec ue3 ping -I oaitun_ue1 -c 4 8.8.8.8
+3. Verify (in a separate terminal):
+      ip netns exec ueN ip addr show oaitun_ue1 | grep inet
+      ip netns exec ueN ping -I oaitun_ue1 -c 4 192.168.70.135
 ```
 
 ### Delete a UE
 
 ```
-CLI → UE Management → Delete UE → select IMSI → confirm
+UE Management → Delete UE → select IMSI → confirm
 ```
 
-Removes DB entries and conf file. Stop and delete the namespace separately:
-```bash
-sudo bash oai_ran/tools/scripts/multi-ue.sh -d3   # remove namespace ue3
+Removes DB entry, conf file, and namespace in one step. Stop the UE process first if running:
 ```
-
-### IMSI range
-
-Pre-provisioned in `oai_db.sql`: `001010000010776` (Slice 1) and `001010000010777` (Slice 2) plus extras (`10768–10778`, `12245–12256`).
-
-For CLI-created UEs use any 15-digit IMSI not already in the DB (e.g. `001010000010779` onwards).
+UE Management → Stop UE → select IMSI
+```
 
 ---
 
@@ -277,11 +264,9 @@ sudo ./start_ran.sh
 # 3. Wait for AMF association
 sleep 25
 
-# 4. UEs (sequential)
-CONFDIR="oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF"
-sudo ./run_ues.sh \
-  "1:$CONFDIR/nrUE_slice1.conf" \
-  "2:$CONFDIR/nrUE_slice2.conf"
+# 4. UEs — via CLI
+sudo ./tools/cli/oranslice
+# UE Management → Run UE → Run All
 ```
 
 ---
@@ -292,10 +277,10 @@ sudo ./run_ues.sh \
 |---------|-----|
 | Container stuck "Exited" | `docker logs <name> --tail 30`; run `restart_cn.sh` again |
 | gNB "No route to AMF" | CN not ready yet — wait and retry `start_ran.sh` |
-| UE no IP on `oaitun_ue1` | Check `docker logs oai-amf` for auth failure; restart UE with `start_ue.sh` |
-| UE stuck `5GMM-REG-INITIATED` | UDR not ready at auth time — `restart_cn.sh` now prevents this; restart UE |
-| UE crash on start | Started multiple UEs in parallel — always use `run_ues.sh` |
-| 3rd+ UE hangs at radio sync | Restart gNB fresh, connect all UEs from scratch via `run_ues.sh` |
+| UE no IP on `oaitun_ue1` | Check `docker logs oai-amf` for auth failure; CLI → UE Management → Stop UE → Run UE |
+| UE stuck `5GMM-REG-INITIATED` | UDR not ready at auth time — `restart_cn.sh` now prevents this; stop and re-run UE via CLI |
+| UE crash on start | Started multiple UEs in parallel — use CLI "Run All" which starts sequentially |
+| 3rd+ UE hangs at radio sync | Restart gNB fresh, then CLI → Run UE → Run All |
 | CLI UEs gone after restart | Shouldn't happen (named volume); if wiped with `-v`, re-create via CLI |
 | ping fails through tunnel | `docker exec oai-spgwu-tiny ip route` — check UE subnet route exists |
 
@@ -303,7 +288,7 @@ sudo ./run_ues.sh \
 
 ## Appendix: Single UE Test
 
-Minimal smoke test with one UE (no slice2, no namespace setup needed):
+Minimal smoke test with one UE:
 
 ```bash
 cd ~/ORANSlice
@@ -312,8 +297,12 @@ sudo ./oai_cn/oai-cn5g-legacy/restart_cn.sh
 sudo ./start_ran.sh
 sleep 25
 
-sudo ./start_ue.sh 1 oai_ran/targets/PROJECTS/GENERIC-NR-5GC/CONF/nrUE_slice1.conf
+# Create + run via CLI
+sudo ./tools/cli/oranslice
+# UE Management → Create UE  (Slice 1, use defaults)
+# UE Management → Run UE     (select the new IMSI)
 
+# Verify (in another terminal)
 ip netns exec ue1 ping -I oaitun_ue1 -c 4 192.168.70.135
 ip netns exec ue1 ping -I oaitun_ue1 -c 4 8.8.8.8
 ```

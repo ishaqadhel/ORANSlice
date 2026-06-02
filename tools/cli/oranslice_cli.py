@@ -741,6 +741,125 @@ def _wizard_delete_ue() -> None:
         _handle_error(e)
 
 
+def _wizard_run_ue() -> None:
+    try:
+        ns_map = _load_ns_map()
+        ues = list_ues()
+        runnable = [
+            u for u in ues
+            if u["imsi"] in ns_map
+            and (UE_CONF_DIR / f"nrUE_{u['imsi']}.conf").exists()
+        ]
+        if not runnable:
+            rprint("[yellow]No UEs ready to run. Need conf file + namespace (create a UE first).[/]")
+            return
+
+        start_ue_script = REPO_ROOT / "start_ue.sh"
+        if not start_ue_script.exists():
+            raise FileNotFoundError(f"start_ue.sh not found at {start_ue_script}")
+
+        choices = (
+            ["Run All  (sequential)"]
+            + [
+                f"{u['imsi']}  →  ue{ns_map[u['imsi']]}  ({list(json.loads(u['dnn_json'] or '{}').keys() or ['?'])[0] if u.get('dnn_json') else '?'})"
+                for u in runnable
+            ]
+            + ["Cancel"]
+        )
+        choice = questionary.select("Select UE to run:", choices=choices).ask()
+        if choice is None or choice == "Cancel":
+            return
+
+        if choice.startswith("Run All"):
+            to_run = runnable
+        else:
+            imsi = choice.split()[0]
+            to_run = [u for u in runnable if u["imsi"] == imsi]
+
+        for u in to_run:
+            imsi = u["imsi"]
+            ns_index = ns_map[imsi]
+            conf_path = UE_CONF_DIR / f"nrUE_{imsi}.conf"
+            rprint(f"[dim]Starting UE {imsi} in namespace ue{ns_index} — waiting for PDU session (up to 120s)...[/]")
+            result = subprocess.run(
+                ["bash", str(start_ue_script), str(ns_index), str(conf_path)],
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"start_ue.sh exited {result.returncode} for UE {imsi}")
+    except (ValueError, RuntimeError, FileNotFoundError) as e:
+        _handle_error(e)
+    except KeyboardInterrupt:
+        rprint("[yellow]Cancelled.[/]")
+
+
+def _wizard_stop_ue() -> None:
+    try:
+        ns_map = _load_ns_map()
+        ues = list_ues()
+        stoppable = [
+            u for u in ues
+            if u["imsi"] in ns_map
+            and (UE_CONF_DIR / f"nrUE_{u['imsi']}.conf").exists()
+        ]
+        if not stoppable:
+            rprint("[yellow]No UEs with namespace assignment.[/]")
+            return
+
+        choices = [f"{u['imsi']}  →  ue{ns_map[u['imsi']]}" for u in stoppable] + ["Cancel"]
+        choice = questionary.select("Select UE to stop:", choices=choices).ask()
+        if choice is None or choice == "Cancel":
+            return
+
+        imsi = choice.split()[0]
+        conf_path = UE_CONF_DIR / f"nrUE_{imsi}.conf"
+        result = subprocess.run(["pkill", "-f", str(conf_path)], capture_output=True)
+        if result.returncode == 0:
+            rprint(f"[green]Stopped UE {imsi}[/]")
+        elif result.returncode == 1:
+            rprint(f"[yellow]No running process found for UE {imsi}[/]")
+        else:
+            raise RuntimeError(f"pkill failed (exit {result.returncode})")
+    except (ValueError, RuntimeError) as e:
+        _handle_error(e)
+    except KeyboardInterrupt:
+        rprint("[yellow]Cancelled.[/]")
+
+
+def _wizard_delete_orphan_ues() -> None:
+    try:
+        ues = list_ues()
+        orphans = [u for u in ues if not (UE_CONF_DIR / f"nrUE_{u['imsi']}.conf").exists()]
+        if not orphans:
+            rprint("[green]No orphan UEs — all have conf files.[/]")
+            return
+
+        rprint(f"[yellow]{len(orphans)} UE(s) without conf files:[/]")
+        for u in orphans:
+            rprint(f"  {u['imsi']}")
+
+        confirmed = questionary.confirm(
+            f"Delete all {len(orphans)} orphan UEs from DB?",
+            default=False,
+        ).ask()
+        if not confirmed:
+            rprint("[yellow]Cancelled.[/]")
+            return
+
+        deleted = 0
+        for u in orphans:
+            try:
+                delete_ue(u["imsi"])
+                deleted += 1
+            except Exception as e:
+                rprint(f"[red]Failed to delete {u['imsi']}: {e}[/]")
+        rprint(f"[green]Deleted {deleted} orphan UE(s).[/]")
+    except (ValueError, RuntimeError) as e:
+        _handle_error(e)
+    except KeyboardInterrupt:
+        rprint("[yellow]Cancelled.[/]")
+
+
 def _wizard_create_namespace() -> None:
     try:
         existing = list_namespaces()
@@ -799,6 +918,57 @@ def _wizard_delete_namespace() -> None:
         delete_namespace(n)
         rprint(f"[green]Deleted namespace {ns}[/]")
     except (ValueError, RuntimeError, FileNotFoundError) as e:
+        _handle_error(e)
+    except KeyboardInterrupt:
+        rprint("[yellow]Cancelled.[/]")
+
+
+def _wizard_sync_namespaces() -> None:
+    try:
+        ns_map = _load_ns_map()
+        live_ns = list_namespaces()
+        untracked = [
+            ns for ns in live_ns
+            if ns.startswith("ue") and ns[2:].isdigit()
+            and int(ns[2:]) not in ns_map.values()
+        ]
+        if not untracked:
+            rprint("[green]All live namespaces are already tracked.[/]")
+            return
+
+        ues = list_ues()
+        unmapped_imsis = [
+            u["imsi"] for u in ues
+            if u["imsi"] not in ns_map
+            and (UE_CONF_DIR / f"nrUE_{u['imsi']}.conf").exists()
+        ]
+
+        rprint(f"[bold]Untracked namespaces:[/] {', '.join(untracked)}")
+        rprint(
+            f"[dim]UEs with conf file but no namespace: "
+            f"{', '.join(unmapped_imsis) if unmapped_imsis else 'none'}[/]"
+        )
+
+        for ns in untracked:
+            ns_index = int(ns[2:])
+            choices = unmapped_imsis + ["Skip", "Cancel"]
+            imsi = questionary.select(
+                f"Assign namespace {ns} to which UE?",
+                choices=choices,
+            ).ask()
+            if imsi is None or imsi == "Cancel":
+                rprint("[yellow]Sync cancelled.[/]")
+                return
+            if imsi == "Skip":
+                continue
+            ns_map[imsi] = ns_index
+            if imsi in unmapped_imsis:
+                unmapped_imsis.remove(imsi)
+            rprint(f"[green]Mapped {ns} → IMSI {imsi}[/]")
+
+        _save_ns_map(ns_map)
+        rprint(f"[green]Namespace map saved.[/]")
+    except (ValueError, RuntimeError) as e:
         _handle_error(e)
     except KeyboardInterrupt:
         rprint("[yellow]Cancelled.[/]")
@@ -967,7 +1137,7 @@ def ue_menu() -> None:
         try:
             choice = questionary.select(
                 "UE Management",
-                choices=["List UEs", "Create UE", "Delete UE", "Back"],
+                choices=["List UEs", "Create UE", "Run UE", "Stop UE", "Delete UE", "Delete Orphan UEs", "Back"],
             ).ask()
         except KeyboardInterrupt:
             return
@@ -985,8 +1155,14 @@ def ue_menu() -> None:
                 _handle_error(e)
         elif choice == "Create UE":
             _wizard_create_ue()
+        elif choice == "Run UE":
+            _wizard_run_ue()
+        elif choice == "Stop UE":
+            _wizard_stop_ue()
         elif choice == "Delete UE":
             _wizard_delete_ue()
+        elif choice == "Delete Orphan UEs":
+            _wizard_delete_orphan_ues()
 
 
 def namespace_menu() -> None:
@@ -994,7 +1170,7 @@ def namespace_menu() -> None:
         try:
             choice = questionary.select(
                 "Namespace Management",
-                choices=["List Namespaces", "Create Namespace", "Delete Namespace", "Back"],
+                choices=["List Namespaces", "Create Namespace", "Delete Namespace", "Sync Namespaces", "Back"],
             ).ask()
         except KeyboardInterrupt:
             return
@@ -1009,6 +1185,8 @@ def namespace_menu() -> None:
                 print_ns_table(ns_list)
         elif choice == "Create Namespace":
             _wizard_create_namespace()
+        elif choice == "Sync Namespaces":
+            _wizard_sync_namespaces()
         elif choice == "Delete Namespace":
             _wizard_delete_namespace()
 

@@ -43,9 +43,12 @@ sudo -E python3 oranslice_cli.py
 
 | Action | Description |
 |--------|-------------|
-| List UEs | Table of all subscribers from MySQL (`AuthenticationSubscription`) with SST, SD, DNN, static IP, and whether the `.conf` file exists |
-| Create UE | Wizard: enter IMSI → choose slice → auto-assigns next free static IP → inserts DB records + writes `nrUE_{imsi}.conf` |
-| Delete UE | Select IMSI from list → removes DB entries and `.conf` file |
+| List UEs | Table of all subscribers with SST, SD, DNN, static IP, conf file status, and assigned namespace |
+| Create UE | Wizard: enter IMSI → choose slice → auto-assigns static IP + network namespace → inserts DB records, writes `nrUE_{imsi}.conf`, creates `ueN` namespace |
+| Run UE | Select a UE (or "Run All" to start all sequentially) → starts `nr-uesoftmodem` inside its namespace, waits up to 120s for PDU session |
+| Stop UE | Kills the `nr-uesoftmodem` process for the selected UE |
+| Delete UE | Select IMSI → removes DB entries, conf file, and namespace atomically |
+| Delete Orphan UEs | Bulk-removes all DB entries that have no corresponding conf file |
 
 **Slice options when creating a UE:**
 
@@ -62,25 +65,16 @@ Default key/OPC match the pre-provisioned UEs in `oai_db.sql`.
 
 ### Namespace Management
 
-Wraps `oai_ran/tools/scripts/multi-ue.sh`. Supports up to 2 namespaces (`ue1`, `ue2`).
+Wraps `oai_ran/tools/scripts/multi-ue.sh`. Namespaces are auto-managed by Create/Delete UE — use this menu only for manual control or recovery.
 
 | Action | Description |
 |--------|-------------|
-| List Namespaces | Shows active namespaces with their RFSim server address and the command to enter them |
-| Create Namespace | Runs `multi-ue.sh -c{N}` to set up isolated network stack |
-| Delete Namespace | Runs `multi-ue.sh -d{N}` to tear down the namespace |
+| List Namespaces | Shows active namespaces with RFSim address and enter command |
+| Create Namespace | Manually runs `multi-ue.sh -c{N}` |
+| Delete Namespace | Manually runs `multi-ue.sh -d{N}` |
+| Sync Namespaces | One-time backfill: maps pre-existing `ueN` namespaces to IMSIs (only needed for namespaces created outside the CLI) |
 
-> To enter a namespace and run a UE inside it, use the command shown in the list output:
-> ```bash
-> sudo bash ~/ORANSlice/oai_ran/tools/scripts/multi-ue.sh -o1
-> ```
-
-RFSim server addresses per namespace:
-
-| Namespace | `--rfsimulator.serveraddr` |
-|-----------|--------------------------|
-| ue1 | 10.201.1.100 |
-| ue2 | 10.202.1.100 |
+RFSim address formula: `10.(200+N).1.100` — e.g. `ue1` → `10.201.1.100`, `ue3` → `10.203.1.100`.
 
 ---
 
