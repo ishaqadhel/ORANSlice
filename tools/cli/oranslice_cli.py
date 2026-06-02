@@ -41,6 +41,7 @@ DEFAULT_KEY = "fec86ba6eb707ed08905757b1bb44b8f"
 DEFAULT_OPC = "C42449363BBAD02B66D16BC975D77CC1"
 PLMN_ID     = "00101"
 MAX_NS      = 9  # multi-ue.sh hard limit; increase if script is extended
+NS_MAP_FILE = REPO_ROOT / "tools/cli/ue_ns_map.json"
 
 SLICE_CONFIG = {
     "slice1": {"dnn": "oai",  "sst": 1, "sd": None, "subnet": "12.1.1", "sd_hex": "0xFFFFFF"},
@@ -149,7 +150,11 @@ def _write_ue_conf(imsi: str, key: str, opc: str, dnn: str, sst: int, sd) -> Pat
     return path
 
 
-def create_ue(imsi: str, key: str, opc: str, sst: int, sd, dnn: str, static_ip: str) -> Path:
+def create_ue(imsi: str, key: str, opc: str, sst: int, sd, dnn: str, static_ip: str) -> tuple:
+    """Create UE in DB, write conf file, and create network namespace atomically.
+
+    Returns (conf_path, ns_index).
+    """
     insert_auth = """
         INSERT INTO AuthenticationSubscription
             (ueid, authenticationMethod, encPermanentKey, protectionParameterId,
@@ -166,20 +171,34 @@ def create_ue(imsi: str, key: str, opc: str, sst: int, sd, dnn: str, static_ip: 
     nssai_json = json.dumps({"sst": sst, "sd": str(sd) if sd is not None else "0"})
     dnn_json = _build_dnn_conf(dnn, static_ip)
 
-    with get_db() as conn:
-        cur = conn.cursor()
-        try:
-            cur.execute(insert_auth, (imsi, key, key, opc, imsi))
-            cur.execute(insert_smsd, (imsi, PLMN_ID, nssai_json, dnn_json))
-            conn.commit()
-        except mysql.connector.IntegrityError:
-            conn.rollback()
-            raise ValueError(f"UE with IMSI {imsi} already exists in DB")
-        except Exception:
-            conn.rollback()
-            raise
+    ns_index = _next_free_ns_index()
+    create_namespace(ns_index)
 
-    return _write_ue_conf(imsi, key, opc, dnn, sst, sd)
+    conf_path = None
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(insert_auth, (imsi, key, key, opc, imsi))
+                cur.execute(insert_smsd, (imsi, PLMN_ID, nssai_json, dnn_json))
+                conn.commit()
+            except mysql.connector.IntegrityError:
+                conn.rollback()
+                raise ValueError(f"UE with IMSI {imsi} already exists in DB")
+            except Exception:
+                conn.rollback()
+                raise
+
+        conf_path = _write_ue_conf(imsi, key, opc, dnn, sst, sd)
+    except Exception:
+        delete_namespace(ns_index)
+        raise
+
+    ns_map = _load_ns_map()
+    ns_map[imsi] = ns_index
+    _save_ns_map(ns_map)
+
+    return conf_path, ns_index
 
 
 def delete_ue(imsi: str) -> None:
@@ -197,6 +216,15 @@ def delete_ue(imsi: str) -> None:
     if conf_path.exists():
         conf_path.unlink()
 
+    ns_map = _load_ns_map()
+    ns_index = ns_map.pop(imsi, None)
+    if ns_index is not None:
+        try:
+            delete_namespace(ns_index)
+        except (ValueError, RuntimeError):
+            pass
+        _save_ns_map(ns_map)
+
 
 # =============================================================================
 # SECTION 4: Namespace operations
@@ -205,6 +233,26 @@ def delete_ue(imsi: str) -> None:
 def list_namespaces() -> list:
     result = subprocess.run(["ip", "netns", "list"], capture_output=True, text=True)
     return [line.split()[0] for line in result.stdout.splitlines() if line.strip()]
+
+
+def _load_ns_map() -> dict:
+    if NS_MAP_FILE.exists():
+        return json.loads(NS_MAP_FILE.read_text())
+    return {}
+
+
+def _save_ns_map(m: dict) -> None:
+    NS_MAP_FILE.write_text(json.dumps(m, indent=2))
+
+
+def _next_free_ns_index() -> int:
+    mapped = set(_load_ns_map().values())
+    live = {int(ns[2:]) for ns in list_namespaces() if ns.startswith("ue") and ns[2:].isdigit()}
+    used = mapped | live
+    for n in range(1, MAX_NS + 1):
+        if n not in used:
+            return n
+    raise RuntimeError(f"All {MAX_NS} namespace slots are in use")
 
 
 def create_namespace(n: int) -> None:
@@ -431,6 +479,10 @@ def print_ue_table(ues: list) -> None:
     table.add_column("DNN")
     table.add_column("Static IP")
     table.add_column("Conf File", justify="center")
+    table.add_column("Namespace", justify="center")
+
+    ns_map = _load_ns_map()
+    live_ns = set(list_namespaces())
 
     for ue in ues:
         nssai = json.loads(ue["nssai_json"]) if ue.get("nssai_json") else {}
@@ -441,6 +493,15 @@ def print_ue_table(ues: list) -> None:
         ip_str = static_ips[0]["ipv4Addr"] if static_ips else "dynamic"
         conf_exists = (UE_CONF_DIR / f"nrUE_{ue['imsi']}.conf").exists()
 
+        ns_index = ns_map.get(ue["imsi"])
+        ns_name = f"ue{ns_index}" if ns_index is not None else None
+        if ns_name and ns_name in live_ns:
+            ns_cell = f"[green]{ns_name}[/]"
+        elif ns_name:
+            ns_cell = f"[yellow]{ns_name}?[/]"
+        else:
+            ns_cell = "[dim]-[/]"
+
         table.add_row(
             ue["imsi"],
             str(nssai.get("sst", "?")),
@@ -448,6 +509,7 @@ def print_ue_table(ues: list) -> None:
             dnn_name,
             ip_str,
             "[green]yes[/]" if conf_exists else "[red]no[/]",
+            ns_cell,
         )
     console.print(table)
 
@@ -623,7 +685,8 @@ def _wizard_create_ue() -> None:
             f"SST:       {sst},  SD: {cfg['sd_hex']}\n"
             f"Static IP: {static_ip}\n"
             f"Key:       {key[:8]}...\n"
-            f"OPC:       {opc[:8]}...",
+            f"OPC:       {opc[:8]}...\n"
+            f"Namespace: auto-assigned",
             title="New UE Summary",
         ))
 
@@ -632,8 +695,10 @@ def _wizard_create_ue() -> None:
             rprint("[yellow]Cancelled.[/]")
             return
 
-        conf_path = create_ue(imsi, key, opc, sst, sd, dnn, static_ip)
-        rprint(f"[green]Created UE {imsi}[/]  IP: {static_ip}  conf: {conf_path}")
+        conf_path, ns_index = create_ue(imsi, key, opc, sst, sd, dnn, static_ip)
+        rfsim = f"10.{200 + ns_index}.1.100"
+        rprint(f"[green]Created UE {imsi}[/]  IP: {static_ip}  namespace: ue{ns_index}  conf: {conf_path}")
+        rprint(f"[dim]Enter namespace: sudo bash {MULTI_UE_SCRIPT} -o{ns_index}  |  rfsim addr: {rfsim}[/]")
 
     except (ValueError, RuntimeError) as e:
         _handle_error(e)
@@ -657,8 +722,11 @@ def _wizard_delete_ue() -> None:
     if imsi is None or imsi == "Cancel":
         return
 
+    ns_map = _load_ns_map()
+    ns_index = ns_map.get(imsi)
+    ns_note = f", namespace ue{ns_index}," if ns_index is not None else ""
     confirmed = questionary.confirm(
-        f"Delete UE {imsi}? This removes DB entries and conf file.",
+        f"Delete UE {imsi}? This removes DB entries{ns_note} and conf file.",
         default=False,
     ).ask()
     if not confirmed:
@@ -667,7 +735,8 @@ def _wizard_delete_ue() -> None:
 
     try:
         delete_ue(imsi)
-        rprint(f"[green]Deleted UE {imsi}[/]")
+        ns_msg = f"  namespace ue{ns_index} removed" if ns_index is not None else ""
+        rprint(f"[green]Deleted UE {imsi}[/]{ns_msg}")
     except (ValueError, RuntimeError) as e:
         _handle_error(e)
 
